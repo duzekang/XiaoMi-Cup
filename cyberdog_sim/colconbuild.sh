@@ -1,0 +1,1 @@
+colcon build --packages-select cyberdog_simulator --event-handlers console_direct+ --merge-install
