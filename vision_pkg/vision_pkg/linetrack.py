@@ -85,7 +85,7 @@ class LineTrackNode(Node):
         #     self.cmd_vel_pub.publish(twist_object)
         #     self.get_logger().info("Out of range Stop!!!")
 
-        # 压缩图像发布（保持变量名）
+        # 图像发布（保持变量名）
         try:
             msg = Image()
             msg = self.cvBridge.cv2_to_imgmsg(mask, encoding="mono8")
@@ -96,7 +96,6 @@ class LineTrackNode(Node):
 
     def image_callback(self, msg):
         try:
-            # 解压缩图像（网页7、网页6）
             cv_image = self.cvBridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             
             # 执行后续处理（保持原处理流程）

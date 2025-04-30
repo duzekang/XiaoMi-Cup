@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vision_pkg</name>
+  <version>0.0.0</version>
+  <description>视觉巡线功能包，实现基于OpenCV的黄色车道线检测与机器人速度控制</description>
+  <maintainer email="2154863296@qq.com">root</maintainer>
+  <license>Apache-2.0</license>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <depend>rclpy</depend>              <!-- ROS2 Python核心库 -->
+  <depend>sensor_msgs</depend>       <!-- 图像消息 -->
+  <depend>geometry_msgs</depend>     <!-- Twist速度控制消息 -->
+  <depend>image_transport</depend>    <!-- 图像传输优化 -->
+  <depend>cv_bridge</depend>  <!-- 同时包含build和exec依赖 -->
+  <exec_depend>opencv-python</exec_depend>          <!-- OpenCV与ROS2桥接 -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
