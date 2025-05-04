@@ -71,15 +71,17 @@ class CompleteController : public rclcpp::Node {
         lcm::LCM lcm2;
         lcm_types::robot_control_cmd_lcmt cmd{};
         State current_state;
-        size_t current_point= 0;
+        size_t target_point= 0;
 
         std::vector<Point> points;
         std::vector<double> x_coords;
         std::vector<double> y_coords;
         Point current;
-        float current_vx;
-        float current_vy;
-        float current_pitch;
+        double current_vx;
+        double current_vy;
+        double current_pitch;
+        double distance = 0;
+        bool flag_back = false;
         
         rclcpp::Time state_start_time;
         rclcpp::TimerBase::SharedPtr control_timer;
@@ -146,7 +148,7 @@ class CompleteController : public rclcpp::Node {
                     cmd.mode = 12;
                     cmd.gait_id = 0;
                     if ((this->now() - state_start_time).seconds() > 6.0) {
-                        current_point = 0;
+                        target_point = 0;
                         current_state = MOVE;
                     }
                     break;
@@ -155,11 +157,11 @@ class CompleteController : public rclcpp::Node {
                 case MOVE:
                 {
                     //运动代码补充
-                    if (current_point >= points.size()) {
+                    if (target_point >= points.size()) {
                         current_state = COMPLETED;
                     }
                     if (check_position_reached()) {
-                        RCLCPP_INFO(this->get_logger(), "到达目标点 %zu", current_point);
+                        RCLCPP_INFO(this->get_logger(), "到达目标点 %zu", target_point);
                         state_start_time = this->now();
                         current_state = SIT;
                     }
@@ -177,12 +179,33 @@ class CompleteController : public rclcpp::Node {
                     }
                     break;
                 }
+
                 case COMPLETED:
+                {
                     RCLCPP_INFO(this->get_logger(), "任务完成");
                     break;
+                }
+
+                case STONEWAY:
+                {
+                    RCLCPP_INFO(this->get_logger(), "过石板路");
+                    cmd.mode = 11;
+                    cmd.gait_id = 26;
+                    cmd.vel_des[0] = 0.6;
+
+                    if(flag_back) cmd.vel_des[1] = -current.x * 0.5;
+                    else cmd.vel_des[1] = current.x * 0.5;
+
+                    if(check_position_reached()){
+                        current_state=MOVE;
+                        target_point++;
+                    }
+                    break;;
+                }
+
                 default:
                     RCLCPP_WARN(this->get_logger(), "未处理的状态: %d", current_state);
-                break;
+                    break;
             }
 
             cmd.life_count++;
@@ -212,7 +235,7 @@ class CompleteController : public rclcpp::Node {
 
         //判断是否到点
         bool check_position_reached() {
-            const auto& target = points[current_point];
+            const auto& target = points[target_point];
             const double dx = current.x - target.x;
             const double dy = current.y - target.y;
             return std::hypot(dx, dy) < position_tolerance;
