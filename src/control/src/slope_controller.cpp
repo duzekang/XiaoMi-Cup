@@ -2,51 +2,118 @@
 #include <rclcpp/rclcpp.hpp>
 #include <lcm/lcm-cpp.hpp>
 #include "../lcm_defines/lcm_types/robot_control_cmd_lcmt.hpp"
-#include <sensor_msgs/msg/imu.hpp>
+#include "../lcm_defines/lcm_types/simulator_lcmt.hpp"  // 添加simulator LCM类型
 #include <Eigen/Geometry>
 
 // 全局状态
+enum State { STAND, ASCEND, DESCEND };
+static State current_state = STAND;
+static rclcpp::Time state_start_time;
+static constexpr double SLOPE_ANGLE = 20.0; // 坡度角度
+
+// 全局位置信息
+static double current_x = 0.0;
+static double current_y = 0.0;
+static double current_vx = 0.0;
+static double current_vy = 0.0;
+static double lateral_vel = 0.0;
 static double current_pitch = 0.0;
-static rclcpp::Time start_time;
+static constexpr double TARGET_X = 2.0;  // X轴目标位置
+static constexpr double ASCEND_END_Y = 8.0;  // 上坡结束位置
+static constexpr double STOP_Y = 10.0;    // 程序停止位置
 
+// 横向位置PID控制
+class LateralController {
+    public:
+        LateralController(double kp) : kp(kp) {}
+        double calculate(double current) {
+            return kp * (current - TARGET_X);
+        }
+    private:
+        double kp;
+};
+static LateralController lateral_controller(0.5);  // 比例系数
 
-// IMU 回调
-void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
-    Eigen::Quaterniond q(
-        msg->orientation.w,
-        msg->orientation.x,
-        msg->orientation.y,
-        msg->orientation.z);
-    q.normalize();
-    current_pitch = q.toRotationMatrix().eulerAngles(2, 1, 0)[1];
+class simulator_handler{
+    public:
+    ~simulator_handler() {}
+
+    void handle_message(const lcm::ReceiveBuffer* rbuf, 
+                      const std::string& chan, 
+                      const lcm_types::simulator_lcmt* msg) {
+        (void)rbuf; // 开发阶段显式标记
+        (void)chan;
+        // 更新全局位置信息
+        current_x = msg->p[0];
+        current_y = msg->p[1];
+        current_vx = msg->vb[0];
+        current_vy = msg->vb[1];
+        current_pitch = msg->rpy[1];
+    }  
+};
+
+void state_transition(rclcpp::Node::SharedPtr node) {
+    const auto now = node->now();
+    
+    switch(current_state) {
+    case STAND:
+        if ((now - state_start_time).seconds() > 5.0) { // 站立5秒后开始爬坡
+            current_state = ASCEND;
+            state_start_time = now;
+            RCLCPP_INFO(node->get_logger(), "开始爬坡");
+        }
+        break;
+        
+    case ASCEND:
+        if (current_y >= ASCEND_END_Y) { // 到达Y=8米转下坡
+            current_state = DESCEND;
+            state_start_time = now;
+            RCLCPP_INFO(node->get_logger(), "到达Y=%.2fm，开始下坡", current_y);
+        }
+        break;
+        
+    case DESCEND:
+        if (current_y >= STOP_Y) { // 到达Y=10米停止程序
+            RCLCPP_INFO(node->get_logger(), "到达Y=%.2fm，程序终止", current_y);
+            rclcpp::shutdown();
+            exit(0);
+        }
+        break;
+    }
 }
 
-// 发送控制指令
-void send_command(lcm::LCM& lcm, bool climbing) {
+void send_command(lcm::LCM& lcm) {
     static uint8_t life_count = 0;
     lcm_types::robot_control_cmd_lcmt cmd{};
+    const double slope_rad = SLOPE_ANGLE * M_PI/180.0;
+    
+    // 横向位置控制
+    lateral_vel = lateral_controller.calculate(current_x);
 
-    if(!climbing) {  // 站立模式
-        cmd.mode = 12;       // RECOVERY_STAND
+    switch(current_state) {
+    case STAND: {
+        cmd.mode = 12;
         cmd.gait_id = 0;
-        cmd.contact = 0x0F;   // 四足全触地
-        cmd.pos_des[2] = 0.28; // 标准站立高度
+        cmd.contact = 0x0F;
+        cmd.pos_des[2] = 0.28;
+        cmd.rpy_des[1] = -slope_rad * 1.2; // 增加20%补偿量
         cmd.step_height[0] = 0.0;
         cmd.step_height[1] = 0.0;
-    } else {        // 爬坡模式（20度）
-        std::cout<<"当前picth: "<<current_pitch * 180.0 / M_PI<<"（度）"<<std::endl;
-        constexpr double slope_rad = 20.0 * M_PI/180.0;
-        
+        break;
+    }
+    
+    case ASCEND: {  // 上坡模式
         cmd.mode = 11;        // 运动模式
-        cmd.gait_id = 26;      // TROT_24_16（变频步态）
-        cmd.contact = 0x0F;    // 四足全触地
+        cmd.gait_id = 26;      // TROT_24_16（变频步态）112
         
         // 速度控制（符合TROT_24_16参数范围）
-        cmd.vel_des[0] = 0.4;  // X方向速度（0.4m/s，低于最大值1.6的1/3）
+        cmd.vel_des[0] = 0.4;  // X方向速度
+        cmd.vel_des[1] = lateral_vel/2;
         cmd.vel_des[2] = 0.0;  // 禁止偏航旋转
         
         // 姿态补偿（最大允许0.52rad≈30度）
-        cmd.rpy_des[1] = -slope_rad * 1.2; // 增加20%补偿量
+        cmd.rpy_des[1] = -0.25; // 增加20%补偿量
+        cmd.rpy_des[2] = 1.523;
         
         // 高度控制（基于斜坡几何计算）
         cmd.pos_des[2] = 0.28 * cos(slope_rad); // 实际高度≈0.26m
@@ -56,17 +123,32 @@ void send_command(lcm::LCM& lcm, bool climbing) {
         
         // 足端轨迹优化
         cmd.foot_pose[0] = 0.04;  // 前腿X方向偏移（最大允许0.04m）
-        //cmd.foot_pose[3] = -0.02; // 后腿X方向回缩
+        cmd.foot_pose[3] = -0.02; // 后腿X方向回缩
         
         // 步态参数（基于TROT_24_16特性）
         cmd.step_height[0] = 0.06; // 前腿最大步高（表格允许值）
         cmd.step_height[1] = 0.04; // 后腿较低步高
-        // cmd.gait_param[0] = 0.3f;  // 缩短步态周期
-        // cmd.gait_param[1] = 0.28f; // 摆动相占比
         
         // 运动保护
         cmd.value = 0x01;      // 启用MPC轨迹跟踪
-        cmd.duration = 1000;   // 指令持续1秒（自动续期）
+        break;
+    }
+    
+    case DESCEND: {  // 下坡模式
+        cmd.mode = 11;
+        cmd.gait_id = 26;
+        cmd.contact = 0x0F;
+        
+        cmd.vel_des[0] = 0.3;           // 降低前进速度
+        cmd.vel_des[1] = lateral_vel * 1.2; // 加强位置修正
+        
+        // 姿态调整
+        cmd.rpy_des[1] = -0.35;  // 身体后仰约20度
+        cmd.pos_des[2] = 0.25;   // 略微降低高度
+        cmd.step_height[0] = 0.05;
+        cmd.step_height[1] = 0.07;
+        break;
+    }
     }
 
     cmd.life_count = life_count++;
@@ -77,41 +159,47 @@ int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     auto node = rclcpp::Node::make_shared("slope_ctrl");
     lcm::LCM lcm("udpm://239.255.76.67:7671?ttl=255");
+    lcm::LCM lcm2("udpm://239.255.76.67:7667?ttl=255");
+    
+    // 订阅simulator LCM消息
+    simulator_handler handle_object;
+    lcm2.subscribe<lcm_types::simulator_lcmt>("simulator_state", &simulator_handler::handle_message, &handle_object);
 
-    auto imu_qos = rclcpp::QoS(rclcpp::KeepLast(10))
-        .reliability(RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT)
-        .durability(RMW_QOS_POLICY_DURABILITY_VOLATILE);
+    state_start_time = node->now();
+    rclcpp::Rate rate(50);
 
-    auto imu_sub = node->create_subscription<sensor_msgs::msg::Imu>(
-        "/imu",
-        imu_qos,
-        imu_callback);
-
-    start_time = node->now();
-
-    // 主控制循环
-    while (rclcpp::ok()) {
-        // 处理 ROS 回调
-        rclcpp::spin_some(node);
-
-        // 处理 LCM 消息
+    while(rclcpp::ok()) {
         lcm.handleTimeout(0);
-
-        // 计算运行时间
-        auto elapsed = node->now() - start_time;
-        if (elapsed.seconds() > 60.0) break;  // 20 秒后退出
-
-        // 阶段判断
-        bool climbing = (elapsed.seconds() > 5.0);
+        lcm2.handleTimeout(0);
+        rclcpp::spin_some(node);
+        
+        // 状态转移判断
+        state_transition(node);
+        
         // 发送控制指令
-        send_command(lcm, climbing);
-
-        // 控制频率 50Hz
-        static rclcpp::Rate rate(50); // 50Hz
+        send_command(lcm);
+        
+        // 实时显示位置信息
+        static int count = 0;
+         if (++count % 50 == 0) { // 每秒输出1次
+            std::cout<<"----------------------------------\n";
+            std::cout<<"状态"<<current_state<<"\n";
+            std::cout<<"X= "<<current_x<<"\n";
+            std::cout<<"Y= "<<current_x<<"\n";
+            std::cout<<"vx="<<current_vx<<"\n";
+            std::cout<<"vy="<<current_vy<<"  期望vy="<<lateral_vel<<"\n";
+            std::cout<<"pitch="<<current_pitch<<"\n";
+        }
+        
+        // 最终停止条件双重检查
+        if (current_y >= STOP_Y) {
+            RCLCPP_INFO(node->get_logger(), "到达终点Y=%.2fm，程序终止", current_y);
+            break;
+        }
+        
         rate.sleep();
     }
 
-    RCLCPP_INFO(node->get_logger(), "程序正常退出");
     rclcpp::shutdown();
     return 0;
 }

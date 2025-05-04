@@ -41,7 +41,7 @@ private:
         // 发送指令
         lcm_.publish("robot_control_cmd", &cmd);
         
-        RCLCPP_DEBUG(this->get_logger(), "站立指令已发送");
+        RCLCPP_DEBUG(this->get_logger(), "指令已发送");
     }
 
     lcm::LCM lcm_{"udpm://239.255.76.67:7671?ttl=255"};
