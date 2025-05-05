@@ -1,1 +1,1 @@
-colcon build  --symlink-install --event-handlers console_direct+ --parallel-workers 16 --executor sequential --packages-select control
+colcon build  --symlink-install --event-handlers console_direct+ --parallel-workers 8 --executor sequential --packages-select control
