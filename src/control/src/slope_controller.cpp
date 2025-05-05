@@ -94,21 +94,15 @@ void send_command(lcm::LCM& lcm) {
     case STAND: {
         cmd.mode = 12;
         cmd.gait_id = 0;
-        cmd.contact = 0x0F;
-        cmd.pos_des[2] = 0.28;
-        cmd.rpy_des[1] = -slope_rad * 1.2; // 增加20%补偿量
-        cmd.step_height[0] = 0.0;
-        cmd.step_height[1] = 0.0;
         break;
     }
     
     case ASCEND: {  // 上坡模式
-        cmd.mode = 11;        // 运动模式
-        cmd.gait_id = 26;      // TROT_24_16（变频步态）112
+        cmd.mode = 11;
+        cmd.gait_id = 26;
         
-        // 速度控制（符合TROT_24_16参数范围）
         cmd.vel_des[0] = 0.4;  // X方向速度
-        cmd.vel_des[1] = lateral_vel/2;
+        //cmd.vel_des[1] = lateral_vel;
         cmd.vel_des[2] = 0.0;  // 禁止偏航旋转
         
         // 姿态补偿（最大允许0.52rad≈30度）
@@ -123,7 +117,7 @@ void send_command(lcm::LCM& lcm) {
         
         // 足端轨迹优化
         cmd.foot_pose[0] = 0.04;  // 前腿X方向偏移（最大允许0.04m）
-        cmd.foot_pose[3] = -0.02; // 后腿X方向回缩
+        //cmd.foot_pose[3] = -0.02; // 后腿X方向回缩
         
         // 步态参数（基于TROT_24_16特性）
         cmd.step_height[0] = 0.06; // 前腿最大步高（表格允许值）
@@ -139,14 +133,26 @@ void send_command(lcm::LCM& lcm) {
         cmd.gait_id = 26;
         cmd.contact = 0x0F;
         
-        cmd.vel_des[0] = 0.3;           // 降低前进速度
+        cmd.vel_des[0] = 0.4;           // 降低前进速度
         cmd.vel_des[1] = lateral_vel * 1.2; // 加强位置修正
         
-        // 姿态调整
-        cmd.rpy_des[1] = -0.35;  // 身体后仰约20度
-        cmd.pos_des[2] = 0.25;   // 略微降低高度
-        cmd.step_height[0] = 0.05;
-        cmd.step_height[1] = 0.07;
+        cmd.rpy_des[1] = 0.30; // 增加20%补偿量
+        cmd.rpy_des[2] = 1.523;
+        
+        // 高度控制（基于斜坡几何计算）
+        cmd.pos_des[2] = 0.28 * cos(slope_rad);
+        
+        // 质心后移补偿
+        cmd.pos_des[0] = -0.2 * tan(slope_rad);
+        
+        // 足端轨迹优化
+        cmd.foot_pose[0] = -0.04;
+        
+        cmd.step_height[0] = 0.04; // 前腿最大步高（表格允许值）
+        cmd.step_height[1] = 0.06; // 后腿较低步高
+        
+        // 运动保护
+        cmd.value = 0x01;      // 启用MPC轨迹跟踪
         break;
     }
     }
