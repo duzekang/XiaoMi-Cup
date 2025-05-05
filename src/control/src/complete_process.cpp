@@ -24,6 +24,8 @@ enum State {
     STONEWAY,
     ASCEND,
     DESCEND,
+    LIMIT,
+    YELLOW,
     COMPLETED
 };
 
