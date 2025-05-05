@@ -10,6 +10,9 @@
 #include "../lcm_defines/lcm_types/simulator_lcmt.hpp"
 
 
+#define slope_rad 20* M_PI/180.0
+
+
 enum State {
     INIT,
     STAND,
@@ -19,7 +22,8 @@ enum State {
     SCANCODE,
     SCANARROW,
     STONEWAY,
-    SLOPE,
+    ASCEND,
+    DESCEND,
     COMPLETED
 };
 
@@ -29,6 +33,18 @@ struct Point {
     Point() = default;  // 显式声明默认构造函数
     Point(double x_, double y_) : x(x_), y(y_) {}
 };
+
+// 横向位置PID控制
+class LateralController {
+    public:
+        LateralController(double kp) : kp(kp) {}
+        double calculate(double current, double target) {
+            return kp * (current - target);
+        }
+    private:
+        double kp;
+};
+static LateralController lateral_controller(0.5);  // 比例系数
 
 class CompleteController : public rclcpp::Node {
     public:
@@ -197,10 +213,85 @@ class CompleteController : public rclcpp::Node {
                     else cmd.vel_des[1] = current.x * 0.5;
 
                     if(check_position_reached()){
+                        state_start_time = this->now();
                         current_state=MOVE;
                         target_point++;
                     }
                     break;;
+                }
+
+                case ASCEND: 
+                {  // 上坡模式
+                    double lateral_vel = lateral_controller.calculate(current.x, 2.0);
+                    cmd.mode = 11;
+                    cmd.gait_id = 26;
+                    
+                    cmd.vel_des[0] = 0.4;  // X方向速度
+                    //cmd.vel_des[1] = lateral_vel;
+                    cmd.vel_des[2] = 0.0;  // 禁止偏航旋转
+                    
+                    // 姿态补偿（最大允许0.52rad≈30度）
+                    cmd.rpy_des[1] = -0.25; // 增加20%补偿量
+                    cmd.rpy_des[2] = 1.523;
+                    
+                    // 高度控制（基于斜坡几何计算）
+                    cmd.pos_des[2] = 0.28 * cos(slope_rad); // 实际高度≈0.26m
+                    
+                    // 质心前移补偿（不超过0.235m限制）
+                    cmd.pos_des[0] = 0.2 * tan(slope_rad); // 约0.05m
+                    
+                    // 足端轨迹优化
+                    cmd.foot_pose[0] = 0.04;  // 前腿X方向偏移（最大允许0.04m）
+                    //cmd.foot_pose[3] = -0.02; // 后腿X方向回缩
+                    
+                    // 步态参数（基于TROT_24_16特性）
+                    cmd.step_height[0] = 0.06; // 前腿最大步高（表格允许值）
+                    cmd.step_height[1] = 0.04; // 后腿较低步高
+                    
+                    // 启用MPC轨迹跟踪
+                    cmd.value = 0x01;
+                    if (current.y >= 8.0) { // 到达Y=8米转下坡
+                        current_state = DESCEND;
+                        state_start_time = this->now();
+                        RCLCPP_INFO(this->get_logger(), "到达Y=%.2fm，开始下坡", current.y);
+                    }
+                    break;
+                }
+                
+                case DESCEND: 
+                {  // 下坡模式
+                    double lateral_vel = lateral_controller.calculate(current.x, 2.0);
+                    cmd.mode = 11;
+                    cmd.gait_id = 26;
+                    cmd.contact = 0x0F;
+                    
+                    cmd.vel_des[0] = 0.4;           // 降低前进速度
+                    cmd.vel_des[1] = lateral_vel * 1.2; // 加强位置修正
+                    
+                    cmd.rpy_des[1] = 0.30; // 增加20%补偿量
+                    cmd.rpy_des[2] = 1.523;
+                    
+                    // 高度控制（基于斜坡几何计算）
+                    cmd.pos_des[2] = 0.28 * cos(slope_rad);
+                    
+                    // 质心后移补偿
+                    cmd.pos_des[0] = -0.2 * tan(slope_rad);
+                    
+                    // 足端轨迹优化
+                    cmd.foot_pose[0] = -0.04;
+                    
+                    cmd.step_height[0] = 0.04; // 前腿最大步高（表格允许值）
+                    cmd.step_height[1] = 0.06; // 后腿较低步高
+                    
+                    // 运动保护
+                    cmd.value = 0x01;      // 启用MPC轨迹跟踪
+
+                    if (current.y >= 10.5) { // 到达Y=10.5米转平地
+                        current_state = MOVE;
+                        state_start_time = this->now();
+                        RCLCPP_INFO(this->get_logger(), "到达Y=%.2fm，开始平地", current.y);
+                    }
+                    break;
                 }
 
                 default:
