@@ -38,6 +38,10 @@ class LineTrackNode(Node):
         
         self.cvBridge = CvBridge()
 
+        # 新增：发布偏移量到C++ linetrack节点
+        from std_msgs.msg import Float32
+        self.error_pub = self.create_publisher(Float32, 'line_error', 10)
+
     def process_image(self, cv_image):
         # 图像裁剪（保持原始逻辑）
         height, width, _ = cv_image.shape
@@ -65,6 +69,10 @@ class LineTrackNode(Node):
             print('error_x:',error_x)
         except (ZeroDivisionError, KeyError):
             error_x = 0
+
+        # 新增：发布偏移量到C++ linetrack节点
+        from std_msgs.msg import Float32
+        self.error_pub.publish(Float32(data=float(error_x)))
 
         # # 速度控制消息
         # twist_object = Twist()

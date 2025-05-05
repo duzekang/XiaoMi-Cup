@@ -1,6 +1,0 @@
-package lcm_types;
-
-struct centroid_msg_lcmt {
-    float cx;
-    float error;
-}

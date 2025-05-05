@@ -1,51 +1,28 @@
-#include "../lcm_defines/lcm_types/centroid_msg_lcmt.hpp" // 新增，形心消息类型
-#include <rclcpp/rclcpp.hpp>
-#include <cv_bridge/cv_bridge.h>
-#include <image_transport/image_transport.hpp>
-#include <opencv2/opencv.hpp>
-#include <lcm/lcm-cpp.hpp>
-#include "../lcm_defines/lcm_types/robot_control_cmd_lcmt.hpp"
 
-// 需要你配置的参数（根据实际情况修改）
-#define LINE_TRACK_TOPIC   "RGB_camera/image_raw"  // 图像话题
-#define LCM_CONTROL_TOPIC "robot_control_cmd"      // LCM控制话题
-#define BASE_VELOCITY     0.3                     // 基础前进速度(m/s)
-const float k = 640.0f / 2.0f;      // 320 pixels/m
-const float K_p = 1.2f;              // 中等响应速度
-#define ANGULAR_GAIN (K_p / k)       // ≈ 0.00375
+
+#include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/float32.hpp>
+
+
+
+#define BASE_VELOCITY 0.3
+const float k = 640.0f / 2.0f;
+const float K_p = 1.2f;
+#define ANGULAR_GAIN (K_p / k)
 
 class LineTrackNode : public rclcpp::Node {
-
 public:
     LineTrackNode() : Node("linetrack") {
-        // LCM初始化（与原有系统一致）
-        if (!lcm_.good()) {
-            RCLCPP_FATAL(this->get_logger(), "LCM初始化失败!");
-            rclcpp::shutdown();
-        }
-
-        // 订阅形心/偏移量消息（由Python端发布）
-        lcm_.subscribe("centroid_topic", &LineTrackNode::onCentroidMsg, this);
-
-        // LCM处理线程
-        lcm_thread_ = std::thread([this]() {
-            while (rclcpp::ok()) {
-                lcm_.handleTimeout(50);
-            }
-        });
+        // 订阅偏移量话题
+        error_sub_ = this->create_subscription<std_msgs::msg::Float32>(
+            "line_error", 10,
+            std::bind(&LineTrackNode::onErrorMsg, this, std::placeholders::_1)
+        );
     }
-
-    ~LineTrackNode() {
-        if (lcm_thread_.joinable()) {
-            lcm_thread_.join();
-        }
-    }
-
 private:
-    // 形心消息回调
-    void onCentroidMsg(const lcm::ReceiveBuffer*, const std::string&, const lcm_types::centroid_msg_lcmt* msg) {
-        // 直接用msg->error进行运动控制
-        sendTrackingCommand(msg->error);
+    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr error_sub_;
+    void onErrorMsg(const std_msgs::msg::Float32::SharedPtr msg) {
+        sendTrackingCommand(msg->data);
     }
     // void imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr& msg) {
     //     try {
@@ -85,26 +62,11 @@ private:
  }
 
     void sendTrackingCommand(float lateral_error) {
-        lcm_types::robot_control_cmd_lcmt cmd{};
-        
-        // === 核心修改点：不再设置 mode 字段 ===
-        // 直接发送速度指令
-        cmd.vel_des[0] = BASE_VELOCITY;          // X方向速度（前进）
-        cmd.vel_des[2] = -lateral_error * ANGULAR_GAIN; // Yaw角速度（转向）
-        
-        // 其他字段保持默认值（根据你的需求可选）
-        cmd.rpy_des[0] = 0.0f;  // roll保持水平
-        cmd.rpy_des[1] = 0.0f;  // pitch保持水平
-        
-        lcm_.publish(LCM_CONTROL_TOPIC, &cmd);
+        // TODO: 这里请根据你的实际底盘控制方式，发布ROS2控制指令（如geometry_msgs/msg/Twist等）
+        // 示例：RCLCPP_INFO(this->get_logger(), "error=%.2f", lateral_error);
     }
-
     void sendStopCommand() {
-        lcm_types::robot_control_cmd_lcmt cmd{};
-        // 将速度归零即可停止
-        cmd.vel_des[0] = 0.0f;
-        cmd.vel_des[2] = 0.0f;
-        lcm_.publish(LCM_CONTROL_TOPIC, &cmd);
+        // TODO: 停止控制指令（如有需要）
     }
 
 //     void publishProcessedImage(const cv::Mat& mask) {
