@@ -47,11 +47,6 @@ target_link_libraries(qr_detector
 install(TARGETS qr_detector
   DESTINATION lib/${PROJECT_NAME})
 
-install(
-  DIRECTORY launch
-  DESTINATION share/${PROJECT_NAME}
-)
-
 ament_export_dependencies(
   rclcpp
   sensor_msgs

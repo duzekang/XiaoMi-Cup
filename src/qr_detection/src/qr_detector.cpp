@@ -77,7 +77,7 @@ QRCodeReader::QRCodeReader() : Node("qr_detecor")
     // 创建订阅者，订阅RGB摄像头图像话题
     auto qos = rclcpp::SensorDataQoS().keep_last(10).best_effort();
     subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
-        "RGB_camera/image_raw", 
+        "D435_camera/image_raw", 
         qos, 
         std::bind(&QRCodeReader::imageCallback, this, std::placeholders::_1));
 
