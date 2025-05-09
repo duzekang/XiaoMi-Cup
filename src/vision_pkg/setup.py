@@ -24,8 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'linetrack_node = vision_pkg.linetrack:main',
-            'arrow_detector_node = vision_pkg.arrow_detector:main',
-            'detect_node = vision_pkg.detect:main'
+            'arrow_detector_node = vision_pkg.arrow_detector:main'
         ],
     },
 )

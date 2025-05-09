@@ -8,6 +8,7 @@
 #include <yaml-cpp/yaml.h>
 #include "../lcm_defines/lcm_types/robot_control_cmd_lcmt.hpp"
 #include "../lcm_defines/lcm_types/simulator_lcmt.hpp"
+#include <std_msgs/msg/string.hpp> 
 
 
 #define slope_rad 20* M_PI/180.0
@@ -104,10 +105,22 @@ class CompleteController : public rclcpp::Node {
         rclcpp::Time state_start_time;
         rclcpp::TimerBase::SharedPtr control_timer;
 
+        std::string last_qr_message;
+        int same_message_count = 0;
+        bool scanned = false;
+        std::string code_A;
+        std::string code_B;
+        rclcpp::Subscription<std_msgs::msg::String>::SharedPtr qr_subscription;
 
         // 初始化发布器和订阅器
         void initialize_components() {
             lcm2.subscribe<lcm_types::simulator_lcmt>("simulator_state", &CompleteController::handle_message, this);
+            qr_subscription = this->create_subscription<std_msgs::msg::String>(
+                "/qr_code_info",
+                10,
+                [this](const std_msgs::msg::String::SharedPtr msg) {
+                    this->qr_callback(msg);
+                });
         }
 
         //加载路径点
@@ -146,6 +159,32 @@ class CompleteController : public rclcpp::Node {
             current_pitch = msg->rpy[1];
         }
 
+        void qr_callback(const std_msgs::msg::String::SharedPtr msg) {
+            // 连续相同消息检测
+            if (msg->data == last_qr_message) {
+                same_message_count++;
+            } else {
+                same_message_count = 0;
+                last_qr_message = msg->data;
+            }
+
+            // 设置扫描完成标志
+            scanned = (same_message_count >= 10);  // 连续10次相同视为有效扫描
+
+            // 消息分类存储
+            if (!msg->data.empty()) {
+                if (msg->data[0] == 'A') {
+                    code_A = msg->data;
+                } else if (msg->data[0] == 'B') {
+                    code_B = msg->data;
+                }
+            }
+
+            RCLCPP_DEBUG(this->get_logger(), "Received QR: %s, Scanned: %d", 
+                        msg->data.c_str(), scanned);
+        }
+
+
 
         // ------------------------------状态机主控制循环-----------------------------
         void control_cycle() {
@@ -168,6 +207,23 @@ class CompleteController : public rclcpp::Node {
                     if ((this->now() - state_start_time).seconds() > 6.0) {
                         target_point = 0;
                         current_state = MOVE;
+                    }
+                    break;
+                }
+
+                case SCANCODE:
+                {
+                    cmd.mode = 3;
+                    cmd.gait_id = 0;
+                    cmd.pos_des[2]=0.23;
+                    cmd.rpy_des[1]=-0.22;
+
+                    // 当扫码成功后触发状态转移
+                    if (scanned) {
+                        RCLCPP_INFO(this->get_logger(), "Scanned code: A=%s B=%s", 
+                                code_A.c_str(), code_B.c_str());
+                        current_state = MOVE;
+                        scanned = false;  // 重置标志
                     }
                     break;
                 }
@@ -306,24 +362,6 @@ class CompleteController : public rclcpp::Node {
             lcm.publish("robot_control_cmd", &cmd);
         }
         //---------------------------------------------------------------------------
-
-
-        //检测回车
-        // bool check_for_enter_key() {
-        //     struct timeval tv = {0L, 0L};
-        //     fd_set fds;
-        //     FD_ZERO(&fds);
-        //     FD_SET(STDIN_FILENO, &fds); // STDIN_FILENO是标准输入的文件描述符
-
-        //     int ret = select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv);
-        //     if (ret > 0) {
-        //         // 检测到输入，读取并清空缓冲区
-        //         std::string line;
-        //         std::getline(std::cin, line);
-        //         return true;
-        //     }
-        //     return false;
-        // }
 
 
         //判断是否到点
