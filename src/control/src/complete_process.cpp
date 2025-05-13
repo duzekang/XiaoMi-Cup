@@ -17,6 +17,7 @@
 enum State {
     INIT,
     STAND,
+    TURN,
     MOVE,
     SIT,
     LINETRACK,
@@ -99,6 +100,7 @@ class CompleteController : public rclcpp::Node {
         double current_vx;
         double current_vy;
         double current_pitch;
+        double current_yaw;
         double distance = 0;
         bool flag_back = false;
         
@@ -157,6 +159,7 @@ class CompleteController : public rclcpp::Node {
             current_vx = msg->vb[0];
             current_vy = msg->vb[1];
             current_pitch = msg->rpy[1];
+            current_yaw = msg->rpy[2];
         }
 
         void qr_callback(const std_msgs::msg::String::SharedPtr msg) {
@@ -199,18 +202,6 @@ class CompleteController : public rclcpp::Node {
                     break;
                 }
 
-                case STAND:
-                {
-                    RCLCPP_INFO(this->get_logger(), "执行站立命令");
-                    cmd.mode = 12;
-                    cmd.gait_id = 0;
-                    if ((this->now() - state_start_time).seconds() > 6.0) {
-                        target_point = 0;
-                        current_state = MOVE;
-                    }
-                    break;
-                }
-
                 case SCANCODE:
                 {
                     cmd.mode = 3;
@@ -228,6 +219,49 @@ class CompleteController : public rclcpp::Node {
                     break;
                 }
 
+                case STAND:
+                {
+                    RCLCPP_INFO(this->get_logger(), "执行站立命令");
+                    cmd.mode = 12;
+                    cmd.gait_id = 0;
+                    if ((this->now() - state_start_time).seconds() > 6.0) {
+                        target_point = 0;
+                        current_state = MOVE;
+                    }
+                    break;
+                }
+
+                case TURN: 
+                {
+                    if (target_point >= points.size()) {
+                        current_state = COMPLETED;
+                        break;
+                    }
+
+                    Point target = points[target_point];
+                    double dx = target.x - current.x;
+                    double dy = target.y - current.y;
+                    double target_yaw = atan2(dy, dx);
+
+                    // 角度规范化处理
+                    double delta_yaw = target_yaw - current_yaw;
+                    while (delta_yaw > M_PI) delta_yaw -= 2*M_PI;
+                    while (delta_yaw < -M_PI) delta_yaw += 2*M_PI;
+
+                    // 转向控制
+                    cmd.mode = 11;
+                    cmd.gait_id = 26;
+                    cmd.vel_des[0] = 0.0;
+                    cmd.vel_des[1] = 0.0;
+                    cmd.vel_des[2] = 1.0 * delta_yaw;  // 比例控制系数
+
+                    if (fabs(delta_yaw) < 0.087) {  // 约5度阈值
+                        current_state = MOVE;
+                        RCLCPP_INFO(this->get_logger(), "转向完成，开始移动");
+                    }
+                    break;
+                }
+
                 case MOVE:
                 {
                     //运动代码补充
@@ -237,7 +271,8 @@ class CompleteController : public rclcpp::Node {
                     if (check_position_reached()) {
                         RCLCPP_INFO(this->get_logger(), "到达目标点 %zu", target_point);
                         state_start_time = this->now();
-                        current_state = SIT;
+                        current_state = TURN;
+                        target_point++;
                     }
                     break;
                 }
@@ -262,7 +297,7 @@ class CompleteController : public rclcpp::Node {
 
                 case STONEWAY:
                 {
-                    RCLCPP_INFO(this->get_logger(), "过石板路");
+                    RCLCPP_INFO(this->get_logger(), "开始过石板路");
                     cmd.mode = 11;
                     cmd.gait_id = 26;
                     cmd.vel_des[0] = 0.6;
@@ -271,6 +306,7 @@ class CompleteController : public rclcpp::Node {
                     else cmd.vel_des[1] = current.x * 0.5;
 
                     if(check_position_reached()){
+                        RCLCPP_INFO(this->get_logger(), "完成石板路");
                         state_start_time = this->now();
                         current_state=MOVE;
                         target_point++;
