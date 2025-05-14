@@ -93,10 +93,18 @@ class CompleteController : public rclcpp::Node {
         State current_state;
         size_t target_point= 0;
 
+        //点
         std::vector<Point> points;
         std::vector<double> x_coords;
         std::vector<double> y_coords;
         Point current;
+        std::vector<Point> AB_points{
+            {0.0, 15.8},    // B库1
+            {2.0, 15.8},    // B库2
+            {1.86, -1.05},  // A库1
+            {-0.21, -1.05}  // A库2
+        };
+
         double current_vx;
         double current_vy;
         double current_pitch;
@@ -187,6 +195,41 @@ class CompleteController : public rclcpp::Node {
                         msg->data.c_str(), scanned);
         }
 
+        //判断是否到点
+        bool check_position_reached() {
+            Point target = points[target_point];
+            const double dx = current.x - target.x;
+            const double dy = current.y - target.y;
+            return std::hypot(dx, dy) < position_tolerance;
+        }
+
+        bool check_to_sit() {
+            Point target = points[target_point];
+            const double dx = current.x - target.x;
+            const double dy = current.y - target.y;
+            for (Point point : AB_points){
+                if(std::hypot(dx, dy) < position_tolerance) return true;
+            }
+            return false;
+        }
+
+        void print_parameters(){
+            std::cout<<"position_tolerance :"<<position_tolerance<<"\n";
+            std::cout<<"sit_duration :"<<sit_duration<<std::endl;
+        }
+
+        double calculate_yaw(){
+            Point target = points[target_point];
+            double dx = target.x - current.x;
+            double dy = target.y - current.y;
+            double target_yaw = atan2(dy, dx);
+
+            // 角度规范化处理
+            double delta_yaw = target_yaw - current_yaw;
+            while (delta_yaw > M_PI) delta_yaw -= 2*M_PI;
+            while (delta_yaw < -M_PI) delta_yaw += 2*M_PI;
+            return delta_yaw;
+        }
 
 
         // ------------------------------状态机主控制循环-----------------------------
@@ -238,15 +281,7 @@ class CompleteController : public rclcpp::Node {
                         break;
                     }
 
-                    Point target = points[target_point];
-                    double dx = target.x - current.x;
-                    double dy = target.y - current.y;
-                    double target_yaw = atan2(dy, dx);
-
-                    // 角度规范化处理
-                    double delta_yaw = target_yaw - current_yaw;
-                    while (delta_yaw > M_PI) delta_yaw -= 2*M_PI;
-                    while (delta_yaw < -M_PI) delta_yaw += 2*M_PI;
+                    double delta_yaw=calculate_yaw();
 
                     // 转向控制
                     cmd.mode = 11;
@@ -263,16 +298,26 @@ class CompleteController : public rclcpp::Node {
                 }
 
                 case MOVE:
-                {
-                    //运动代码补充
-                    if (target_point >= points.size()) {
-                        current_state = COMPLETED;
+                {   
+                    double delta_yaw=calculate_yaw();
+                    cmd.mode = 11;
+                    cmd.gait_id = 26;
+                    
+                    cmd.vel_des[0] = 0.8;
+                    cmd.vel_des[1] = 0.5*delta_yaw;
+                    cmd.vel_des[2] = 0.0;
+
+                    if(check_to_sit()){
+                        RCLCPP_INFO(this->get_logger(), "转坐下");
+                        state_start_time = this->now();
+                        target_point++;
+                        current_state = SIT;
+
                     }
                     if (check_position_reached()) {
                         RCLCPP_INFO(this->get_logger(), "到达目标点 %zu", target_point);
-                        state_start_time = this->now();
-                        current_state = TURN;
                         target_point++;
+                        current_state = TURN;
                     }
                     break;
                 }
@@ -282,6 +327,10 @@ class CompleteController : public rclcpp::Node {
                     RCLCPP_INFO(this->get_logger(), "执行坐下命令");
                     cmd.mode = 7;
                     cmd.gait_id = 0;
+
+                    if (target_point >= points.size()) {
+                        current_state = COMPLETED;
+                    }
                     if ((this->now() - state_start_time).seconds() > sit_duration) {
                         current_state = STAND;
                         state_start_time = this->now();
@@ -292,6 +341,15 @@ class CompleteController : public rclcpp::Node {
                 case COMPLETED:
                 {
                     RCLCPP_INFO(this->get_logger(), "任务完成");
+                    cmd.mode = 7;
+                    cmd.gait_id = 0;
+                    lcm.publish("robot_control_cmd", &cmd);
+                    
+                    // 延迟确保指令发送
+                    rclcpp::sleep_for(std::chrono::milliseconds(500));
+                    
+                    // 安全退出
+                    rclcpp::shutdown();
                     break;
                 }
 
@@ -316,7 +374,6 @@ class CompleteController : public rclcpp::Node {
 
                 case ASCEND: 
                 {  // 上坡模式
-                    double lateral_vel = lateral_controller.calculate(current.x, 2.0);
                     cmd.mode = 11;
                     cmd.gait_id = 26;
                     
@@ -344,7 +401,7 @@ class CompleteController : public rclcpp::Node {
                     
                     // 启用MPC轨迹跟踪
                     cmd.value = 0x01;
-                    if (current.y >= 8.0) { // 到达Y=8米转下坡
+                    if (check_position_reached()) { // 到达Y=8米转下坡
                         current_state = DESCEND;
                         state_start_time = this->now();
                         RCLCPP_INFO(this->get_logger(), "到达Y=%.2fm，开始下坡", current.y);
@@ -354,13 +411,11 @@ class CompleteController : public rclcpp::Node {
                 
                 case DESCEND: 
                 {  // 下坡模式
-                    double lateral_vel = lateral_controller.calculate(current.x, 2.0);
                     cmd.mode = 11;
                     cmd.gait_id = 26;
                     cmd.contact = 0x0F;
                     
                     cmd.vel_des[0] = 0.4;           // 降低前进速度
-                    cmd.vel_des[1] = lateral_vel * 1.2; // 加强位置修正
                     
                     cmd.rpy_des[1] = 0.30; // 增加20%补偿量
                     cmd.rpy_des[2] = 1.523;
@@ -380,7 +435,7 @@ class CompleteController : public rclcpp::Node {
                     // 运动保护
                     cmd.value = 0x01;      // 启用MPC轨迹跟踪
 
-                    if (current.y >= 10.5) { // 到达Y=10.5米转平地
+                    if (check_position_reached()) { // 到达Y=10.5米转平地
                         current_state = MOVE;
                         state_start_time = this->now();
                         RCLCPP_INFO(this->get_logger(), "到达Y=%.2fm，开始平地", current.y);
@@ -398,20 +453,6 @@ class CompleteController : public rclcpp::Node {
             lcm.publish("robot_control_cmd", &cmd);
         }
         //---------------------------------------------------------------------------
-
-
-        //判断是否到点
-        bool check_position_reached() {
-            const auto& target = points[target_point];
-            const double dx = current.x - target.x;
-            const double dy = current.y - target.y;
-            return std::hypot(dx, dy) < position_tolerance;
-        }
-
-        void print_parameters(){
-            std::cout<<"position_tolerance :"<<position_tolerance<<"\n";
-            std::cout<<"sit_duration :"<<sit_duration<<std::endl;
-        }
 };
 
 int main(int argc, char** argv) {
