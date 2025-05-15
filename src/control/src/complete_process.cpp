@@ -2,13 +2,14 @@
 #include <memory>
 #include <vector>
 #include <string>
-#include <unistd.h>  // 提供 STDIN_FILENO 的定义
+#include <unistd.h>
 #include <rclcpp/rclcpp.hpp>
 #include <lcm/lcm-cpp.hpp>
 #include <yaml-cpp/yaml.h>
 #include "../lcm_defines/lcm_types/robot_control_cmd_lcmt.hpp"
 #include "../lcm_defines/lcm_types/simulator_lcmt.hpp"
 #include <std_msgs/msg/string.hpp> 
+#include <functional>
 
 
 #define slope_rad 20* M_PI/180.0
@@ -20,6 +21,7 @@ enum State {
     TURN,
     MOVE,
     SIT,
+    COMPLETED,
     LINETRACK,
     SCANCODE,
     SCANARROW,
@@ -27,8 +29,7 @@ enum State {
     ASCEND,
     DESCEND,
     LIMIT,
-    YELLOW,
-    COMPLETED
+    YELLOW
 };
 
 struct Point {
@@ -38,17 +39,17 @@ struct Point {
     Point(double x_, double y_) : x(x_), y(y_) {}
 };
 
-// 横向位置PID控制
-class LateralController {
-    public:
-        LateralController(double kp) : kp(kp) {}
-        double calculate(double current, double target) {
-            return kp * (current - target);
-        }
-    private:
-        double kp;
-};
-static LateralController lateral_controller(0.5);  // 比例系数
+// // 横向位置PID控制
+// class LateralController {
+//     public:
+//         LateralController(double kp) : kp(kp) {}
+//         double calculate(double current, double target) {
+//             return kp * (current - target);
+//         }
+//     private:
+//         double kp;
+// };
+// static LateralController lateral_controller(0.5);  // 比例系数
 
 class CompleteController : public rclcpp::Node {
     public:
@@ -70,7 +71,7 @@ class CompleteController : public rclcpp::Node {
             this->position_tolerance = this->get_parameter("position_tolerance").as_double();
             this->x_coords = this->get_parameter("x_coords").as_double_array();
             this->y_coords = this->get_parameter("y_coords").as_double_array();
-
+            print_parameters();
             // 初始化ROS组件
             initialize_components();
             
@@ -79,7 +80,7 @@ class CompleteController : public rclcpp::Node {
             
             // 创建ROS时间驱动的定时器
             control_timer = this->create_wall_timer(
-            std::chrono::milliseconds(500),
+            std::chrono::milliseconds(20),
             std::bind(&CompleteController::control_cycle, this));
         }
 
@@ -104,6 +105,10 @@ class CompleteController : public rclcpp::Node {
             {1.86, -1.05},  // A库1
             {-0.21, -1.05}  // A库2
         };
+        std::vector<Point> scan_points{
+            {1.0, -1.36},    // 二维码1
+            {1.0, 15.0},    // 二维码2
+        };
 
         double current_vx;
         double current_vy;
@@ -124,7 +129,12 @@ class CompleteController : public rclcpp::Node {
 
         // 初始化发布器和订阅器
         void initialize_components() {
-            lcm2.subscribe<lcm_types::simulator_lcmt>("simulator_state", &CompleteController::handle_message, this);
+            lcm2.subscribe<lcm_types::simulator_lcmt>(
+                "simulator_state",
+                [this](const lcm::ReceiveBuffer* rbuf, const std::string& chan, const lcm_types::simulator_lcmt* msg) {
+                    this->handle_message(rbuf, chan, msg);
+                }
+            );
             qr_subscription = this->create_subscription<std_msgs::msg::String>(
                 "/qr_code_info",
                 10,
@@ -167,7 +177,12 @@ class CompleteController : public rclcpp::Node {
             current_vx = msg->vb[0];
             current_vy = msg->vb[1];
             current_pitch = msg->rpy[1];
-            current_yaw = msg->rpy[2];
+
+            // 新增：低通滤波处理current_yaw
+            static double filtered_yaw = 0.0;
+            const double alpha = 0.2; // 滤波系数
+            filtered_yaw = alpha * msg->rpy[2] + (1-alpha) * filtered_yaw;
+            current_yaw = filtered_yaw;
         }
 
         void qr_callback(const std_msgs::msg::String::SharedPtr msg) {
@@ -204,10 +219,18 @@ class CompleteController : public rclcpp::Node {
         }
 
         bool check_to_sit() {
-            Point target = points[target_point];
-            const double dx = current.x - target.x;
-            const double dy = current.y - target.y;
             for (Point point : AB_points){
+                double dx = current.x - point.x;
+                double dy = current.y - point.y;
+                if(std::hypot(dx, dy) < position_tolerance) return true;
+            }
+            return false;
+        }
+
+        bool check_to_scan(){
+            for (Point point : scan_points){
+                double dx = current.x - point.x;
+                double dy = current.y - point.y;
                 if(std::hypot(dx, dy) < position_tolerance) return true;
             }
             return false;
@@ -222,18 +245,47 @@ class CompleteController : public rclcpp::Node {
             Point target = points[target_point];
             double dx = target.x - current.x;
             double dy = target.y - current.y;
-            double target_yaw = atan2(dy, dx);
-
-            // 角度规范化处理
+            double target_yaw = atan2(dy, dx); // 目标方向的世界坐标系角度
+            
+            // 计算原始角度差
             double delta_yaw = target_yaw - current_yaw;
-            while (delta_yaw > M_PI) delta_yaw -= 2*M_PI;
-            while (delta_yaw < -M_PI) delta_yaw += 2*M_PI;
+            
+            // 规范化到[-π, π]并选择最短路径
+            if (delta_yaw > M_PI) {
+                delta_yaw -= 2 * M_PI;
+            } else if (delta_yaw < -M_PI) {
+                delta_yaw += 2 * M_PI;
+            }
+            
+            // 当角度差绝对值超过π/2时，选择相反方向更优
+            if (delta_yaw > M_PI/2) {
+                delta_yaw -= M_PI; // 向左转不如向右转快
+            } else if (delta_yaw < -M_PI/2) {
+                delta_yaw += M_PI;
+            }
+            
             return delta_yaw;
         }
 
-
+        void print_info(){
+            double delta_yaw=calculate_yaw();
+            std::cout<<"------------状态信息------------\n";
+            std::cout<<"State :"<<current_state<<"\n";
+            std::cout<<"current.x :"<<current.x<<"\n";
+            std::cout<<"current.y :"<<current.y<<"\n";
+            if (target_point <= points.size()) {
+                std::cout<<"target_point :"<<target_point<<"\n";
+                std::cout<<"target.x :"<<points[target_point].x<<"\n";
+                std::cout<<"target.y :"<<points[target_point].y<<"\n";
+            }
+            std::cout<<"current_yaw :"<<current_yaw<<"\n";
+            std::cout<<"delta_yaw :"<<delta_yaw<<"\n";
+        }
         // ------------------------------状态机主控制循环-----------------------------
         void control_cycle() {
+            lcm.handleTimeout(0);
+            lcm2.handleTimeout(0);
+            print_info();
             switch (current_state) {
                 case INIT:
                 {
@@ -242,23 +294,6 @@ class CompleteController : public rclcpp::Node {
                     cmd.life_count=0;
                     print_parameters();
                     current_state = STAND;
-                    break;
-                }
-
-                case SCANCODE:
-                {
-                    cmd.mode = 3;
-                    cmd.gait_id = 0;
-                    cmd.pos_des[2]=0.23;
-                    cmd.rpy_des[1]=-0.22;
-
-                    // 当扫码成功后触发状态转移
-                    if (scanned) {
-                        RCLCPP_INFO(this->get_logger(), "Scanned code: A=%s B=%s", 
-                                code_A.c_str(), code_B.c_str());
-                        current_state = MOVE;
-                        scanned = false;  // 重置标志
-                    }
                     break;
                 }
 
@@ -282,16 +317,24 @@ class CompleteController : public rclcpp::Node {
                     }
 
                     double delta_yaw=calculate_yaw();
+                    double turn_speed;
+                    if(fabs(delta_yaw)<=0.3){
+                        if(delta_yaw < 0) turn_speed=-0.3;
+                        if(delta_yaw >0 ) turn_speed=0.3;
+                    }else{
+                        turn_speed=delta_yaw;
+                    }
 
                     // 转向控制
                     cmd.mode = 11;
                     cmd.gait_id = 26;
                     cmd.vel_des[0] = 0.0;
                     cmd.vel_des[1] = 0.0;
-                    cmd.vel_des[2] = 1.0 * delta_yaw;  // 比例控制系数
+                    cmd.vel_des[2] = 1.0 * turn_speed;  // 正左转，负右转
 
-                    if (fabs(delta_yaw) < 0.087) {  // 约5度阈值
+                    if (fabs(delta_yaw) < 0.0174) {  // 约1度阈值
                         current_state = MOVE;
+                        cmd.vel_des[2] = 0.0;
                         RCLCPP_INFO(this->get_logger(), "转向完成，开始移动");
                     }
                     break;
@@ -303,16 +346,20 @@ class CompleteController : public rclcpp::Node {
                     cmd.mode = 11;
                     cmd.gait_id = 26;
                     
-                    cmd.vel_des[0] = 0.8;
-                    cmd.vel_des[1] = 0.5*delta_yaw;
+                    cmd.vel_des[0] = 0.4;
+                    //cmd.vel_des[1] = 0.5*delta_yaw;
                     cmd.vel_des[2] = 0.0;
-
+                    if(check_to_scan()){
+                        RCLCPP_INFO(this->get_logger(), "转检测");
+                        state_start_time = this->now();
+                        target_point++;
+                        current_state = SCANCODE;
+                    }
                     if(check_to_sit()){
                         RCLCPP_INFO(this->get_logger(), "转坐下");
                         state_start_time = this->now();
                         target_point++;
                         current_state = SIT;
-
                     }
                     if (check_position_reached()) {
                         RCLCPP_INFO(this->get_logger(), "到达目标点 %zu", target_point);
@@ -350,6 +397,23 @@ class CompleteController : public rclcpp::Node {
                     
                     // 安全退出
                     rclcpp::shutdown();
+                    break;
+                }
+
+                case SCANCODE:
+                {
+                    cmd.mode = 3;
+                    cmd.gait_id = 0;
+                    cmd.pos_des[2]=0.23;
+                    cmd.rpy_des[1]=-0.22;
+
+                    // 当扫码成功后触发状态转移
+                    if (scanned) {
+                        RCLCPP_INFO(this->get_logger(), "Scanned code: A=%s B=%s", 
+                                code_A.c_str(), code_B.c_str());
+                        current_state = MOVE;
+                        scanned = false;  // 重置标志
+                    }
                     break;
                 }
 
@@ -435,7 +499,7 @@ class CompleteController : public rclcpp::Node {
                     // 运动保护
                     cmd.value = 0x01;      // 启用MPC轨迹跟踪
 
-                    if (check_position_reached()) { // 到达Y=10.5米转平地
+                    if (check_position_reached()) { // 到达平地
                         current_state = MOVE;
                         state_start_time = this->now();
                         RCLCPP_INFO(this->get_logger(), "到达Y=%.2fm，开始平地", current.y);
