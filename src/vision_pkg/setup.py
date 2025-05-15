@@ -23,8 +23,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'linetrack_node = vision_pkg.linetrack:main',
-            'arrow_detector_node = vision_pkg.arrow_detector:main'
+            'linetrack = vision_pkg.linetrack:main',
+            'arrow_detector = vision_pkg.arrow_detector:main'
         ],
     },
 )
